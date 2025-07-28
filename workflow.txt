@@ -1,0 +1,12 @@
+I am creating a script that finds and embeds maps into history books. It looks for the name of the map,
+then it will embed the map into the epub at the end of the paragraph. I will use openai for my AI, 
+googlemaps api for my geocoding and downloading of maps. Various other dependencies will be required,
+for chunking text for example. 
+
+1. Import and parse epub file. 
+2. Chunk epub file for AI consumption. 
+3. AI scans over each chunk of text. It will identify the names of places in a chunk,
+interpret them into their modern day equivalents,
+then output a normalized list of all places to be depicted on a map.
+4. The Normalized locations are then sent to googlemaps API where it will get the image data for the map.
+5. The maps will then be embedded into a copy of the epub at the end of the paragraph where the location was mentioned.
