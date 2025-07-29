@@ -7,7 +7,7 @@ maintaining sentence boundaries for better context preservation.
 
 import re
 import logging
-from typing import List
+from typing import List, Tuple
 
 
 class TextChunker:
@@ -21,12 +21,15 @@ class TextChunker:
         """
         Split paragraphs into chunks suitable for AI processing.
         
+        Each paragraph that fits within chunk_size is kept as its own chunk.
+        Only paragraphs exceeding chunk_size are split.
+        
         Args:
             paragraphs: List of paragraph strings
             chunk_size: Maximum characters per chunk (default: 1000)
             
         Returns:
-            List of text chunks, split at sentence boundaries when possible
+            List of text chunks, with paragraph boundaries preserved when possible
         """
         if not paragraphs:
             self.logger.info("No paragraphs to chunk")
@@ -36,7 +39,6 @@ class TextChunker:
             raise ValueError("Chunk size must be positive")
         
         chunks = []
-        current_chunk = ""
         
         for paragraph in paragraphs:
             # Clean and validate paragraph
@@ -44,32 +46,61 @@ class TextChunker:
             if not paragraph:
                 continue
             
-            # If paragraph is small enough, try to add to current chunk
-            if len(current_chunk) + len(paragraph) + 1 <= chunk_size:
-                if current_chunk:
-                    current_chunk += " " + paragraph
-                else:
-                    current_chunk = paragraph
+            # If paragraph fits within chunk size, keep it as is
+            if len(paragraph) <= chunk_size:
+                chunks.append(paragraph)
             else:
-                # Save current chunk if it exists
-                if current_chunk:
-                    chunks.append(current_chunk)
-                
-                # Handle paragraph that might be larger than chunk_size
-                if len(paragraph) <= chunk_size:
-                    current_chunk = paragraph
-                else:
-                    # Split large paragraph into sentence-based chunks
-                    paragraph_chunks = self._split_paragraph_by_sentences(paragraph, chunk_size)
-                    chunks.extend(paragraph_chunks[:-1])  # Add all but last chunk
-                    current_chunk = paragraph_chunks[-1] if paragraph_chunks else ""
-        
-        # Add final chunk if it exists
-        if current_chunk:
-            chunks.append(current_chunk)
+                # Split large paragraph into sentence-based chunks
+                paragraph_chunks = self._split_paragraph_by_sentences(paragraph, chunk_size)
+                chunks.extend(paragraph_chunks)
         
         self.logger.info(f"Split {len(paragraphs)} paragraphs into {len(chunks)} chunks")
         return chunks
+    
+    def chunk_text_with_mapping(self, paragraphs: List[str], chunk_size: int = 1000) -> Tuple[List[str], List[Tuple[int, int]]]:
+        """
+        Split paragraphs into chunks and return mapping information.
+        
+        This variant returns both chunks and mapping of chunks to original paragraphs,
+        which is useful for the embedder to know which paragraph each chunk came from.
+        
+        Args:
+            paragraphs: List of paragraph strings
+            chunk_size: Maximum characters per chunk (default: 1000)
+            
+        Returns:
+            Tuple of (chunks, chunk_info) where chunk_info is a list of
+            (start_para_idx, end_para_idx) tuples for each chunk
+        """
+        if not paragraphs:
+            self.logger.info("No paragraphs to chunk")
+            return [], []
+        
+        if chunk_size <= 0:
+            raise ValueError("Chunk size must be positive")
+        
+        chunks = []
+        chunk_info = []
+        
+        for para_idx, paragraph in enumerate(paragraphs):
+            # Clean and validate paragraph
+            paragraph = paragraph.strip()
+            if not paragraph:
+                continue
+            
+            # If paragraph fits within chunk size, keep it as is
+            if len(paragraph) <= chunk_size:
+                chunks.append(paragraph)
+                chunk_info.append((para_idx, para_idx))  # Single paragraph chunk
+            else:
+                # Split large paragraph into sentence-based chunks
+                paragraph_chunks = self._split_paragraph_by_sentences(paragraph, chunk_size)
+                for chunk in paragraph_chunks:
+                    chunks.append(chunk)
+                    chunk_info.append((para_idx, para_idx))  # All sub-chunks map to same paragraph
+        
+        self.logger.info(f"Split {len(paragraphs)} paragraphs into {len(chunks)} chunks with mapping")
+        return chunks, chunk_info
     
     def _split_paragraph_by_sentences(self, paragraph: str, chunk_size: int) -> List[str]:
         """

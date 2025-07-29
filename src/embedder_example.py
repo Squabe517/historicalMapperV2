@@ -45,11 +45,15 @@ def process_epub_with_maps(input_path: str, output_path: str):
         log_info(f"Processing: {metadata['title']} by {', '.join(metadata['authors'])}")
         log_info(f"Found {len(paragraphs)} paragraphs")
         
-        # 2. Chunk text for AI processing
+        # 2. Chunk text for AI processing with paragraph mapping
         log_info("Chunking text for AI analysis...")
         chunker = TextChunker()
-        chunks = chunker.chunk_text(paragraphs, chunk_size=1000)
-        log_info(f"Created {len(chunks)} chunks")
+        chunks, chunk_info = chunker.chunk_text_with_mapping(paragraphs, chunk_size=1000)
+        log_info(f"Created {len(chunks)} chunks from {len(paragraphs)} paragraphs")
+        
+        # Log chunk-to-paragraph mapping statistics
+        unique_paragraphs = len(set(info[0] for info in chunk_info))
+        log_info(f"Chunks map to {unique_paragraphs} unique paragraphs")
         
         # 3. Extract places using AI
         log_info("Extracting place names using AI...")
@@ -79,10 +83,15 @@ def process_epub_with_maps(input_path: str, output_path: str):
             embed_strategy="external"  # Use external files
         )
         
-        # 6. Embed maps into EPUB
+        # 6. Embed maps into EPUB with chunk mapping info
         log_info("Embedding maps into EPUB...")
         embedder = EpubMapEmbedder(config=config)
-        embedder.embed_maps(book, ai_results, map_images)
+        embedder.embed_maps(
+            book=book,
+            ai_results=ai_results,
+            map_images=map_images,
+            chunk_info=chunk_info  # Pass the chunk-to-paragraph mapping
+        )
         
         # 7. Save enhanced EPUB
         log_info(f"Saving enhanced EPUB to: {output_path}")
@@ -94,6 +103,7 @@ def process_epub_with_maps(input_path: str, output_path: str):
         cache_stats = orchestrator.get_stats()
         print(f"\n📊 Statistics:")
         print(f"  - Paragraphs processed: {len(paragraphs)}")
+        print(f"  - Text chunks created: {len(chunks)}")
         print(f"  - Places identified: {total_places}")
         print(f"  - Maps embedded: {len(map_images)}")
         print(f"  - Cache usage: {cache_stats['cache']['usage_percent']:.1f}%")
@@ -163,6 +173,32 @@ def demonstrate_selective_embedding():
     # Would then pass filtered_results to embedder.embed_maps()
 
 
+def demonstrate_chunking_strategies():
+    """Demonstrate the difference between chunking strategies."""
+    print("\n" + "=" * 60)
+    print("Chunking Strategy Comparison")
+    print("=" * 60)
+    
+    # Sample paragraphs
+    sample_paragraphs = [
+        "Rome was the capital of the Roman Empire.",  # Short paragraph
+        "Venice, known as the 'Queen of the Adriatic', was a major financial and maritime power during the Middle Ages and Renaissance. The city is built on 118 small islands.",  # Medium paragraph
+        "Constantinople " + "was an important city " * 50  # Very long paragraph
+    ]
+    
+    chunker = TextChunker()
+    
+    # New 1:1 mapping approach
+    chunks, chunk_info = chunker.chunk_text_with_mapping(sample_paragraphs, chunk_size=100)
+    
+    print("\n📍 With 1:1 Paragraph Mapping:")
+    print(f"  - Input paragraphs: {len(sample_paragraphs)}")
+    print(f"  - Output chunks: {len(chunks)}")
+    print(f"  - Chunk-to-paragraph mapping:")
+    for i, (chunk, info) in enumerate(zip(chunks, chunk_info)):
+        print(f"    Chunk {i}: Maps to paragraph {info[0]} (length: {len(chunk)} chars)")
+
+
 def main():
     """Run examples."""
     # Initialize logging
@@ -185,6 +221,7 @@ def main():
     # Run demonstrations
     demonstrate_custom_configuration()
     demonstrate_selective_embedding()
+    demonstrate_chunking_strategies()
     
     # Process a real EPUB if provided
     if len(sys.argv) > 2:
