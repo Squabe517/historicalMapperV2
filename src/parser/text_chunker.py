@@ -3,11 +3,25 @@ Text chunking utilities for the Historical ePub Map Enhancer.
 
 Splits extracted text into optimal chunks for AI processing while
 maintaining sentence boundaries for better context preservation.
+
+Supports both plain text and DOM-based processing.
 """
 
 import re
 import logging
-from typing import List, Tuple
+from typing import List, Tuple, Union, Dict, Any
+from dataclasses import dataclass
+
+from .document_parser import ParagraphElement
+
+
+@dataclass
+class ChunkedParagraph:
+    """Represents a chunk with its source paragraph information."""
+    text: str                           # The chunk text
+    paragraph_element: ParagraphElement # Source paragraph element
+    chunk_index: int                    # Index within the paragraph (0 if not split)
+    is_split: bool                      # True if paragraph was split into multiple chunks
 
 
 class TextChunker:
@@ -57,6 +71,57 @@ class TextChunker:
         self.logger.info(f"Split {len(paragraphs)} paragraphs into {len(chunks)} chunks")
         return chunks
     
+    def chunk_paragraph_elements(self, paragraph_elements: List[ParagraphElement], 
+                               chunk_size: int = 1000) -> List[ChunkedParagraph]:
+        """
+        Split paragraph elements into chunks while maintaining DOM references.
+        
+        Args:
+            paragraph_elements: List of ParagraphElement objects
+            chunk_size: Maximum characters per chunk (default: 1000)
+            
+        Returns:
+            List of ChunkedParagraph objects with DOM references preserved
+        """
+        if not paragraph_elements:
+            self.logger.info("No paragraph elements to chunk")
+            return []
+        
+        if chunk_size <= 0:
+            raise ValueError("Chunk size must be positive")
+        
+        chunked_paragraphs = []
+        
+        for para_elem in paragraph_elements:
+            text = para_elem.text.strip()
+            if not text:
+                continue
+            
+            # If paragraph fits within chunk size, keep it as is
+            if len(text) <= chunk_size:
+                chunked = ChunkedParagraph(
+                    text=text,
+                    paragraph_element=para_elem,
+                    chunk_index=0,
+                    is_split=False
+                )
+                chunked_paragraphs.append(chunked)
+            else:
+                # Split large paragraph into sentence-based chunks
+                text_chunks = self._split_paragraph_by_sentences(text, chunk_size)
+                for idx, chunk_text in enumerate(text_chunks):
+                    chunked = ChunkedParagraph(
+                        text=chunk_text,
+                        paragraph_element=para_elem,
+                        chunk_index=idx,
+                        is_split=True
+                    )
+                    chunked_paragraphs.append(chunked)
+        
+        self.logger.info(f"Split {len(paragraph_elements)} paragraph elements into "
+                        f"{len(chunked_paragraphs)} chunks")
+        return chunked_paragraphs
+    
     def chunk_text_with_mapping(self, paragraphs: List[str], chunk_size: int = 1000) -> Tuple[List[str], List[Tuple[int, int]]]:
         """
         Split paragraphs into chunks and return mapping information.
@@ -101,6 +166,33 @@ class TextChunker:
         
         self.logger.info(f"Split {len(paragraphs)} paragraphs into {len(chunks)} chunks with mapping")
         return chunks, chunk_info
+    
+    def aggregate_results_by_paragraph(self, chunked_paragraphs: List[ChunkedParagraph],
+                                     chunk_results: List[List[Dict[str, Any]]]) -> Dict[ParagraphElement, List[Dict[str, Any]]]:
+        """
+        Aggregate AI results back to their source paragraphs.
+        
+        Args:
+            chunked_paragraphs: List of ChunkedParagraph objects
+            chunk_results: AI results for each chunk
+            
+        Returns:
+            Dictionary mapping ParagraphElement to list of all results for that paragraph
+        """
+        if len(chunked_paragraphs) != len(chunk_results):
+            raise ValueError("Number of chunks and results must match")
+        
+        aggregated = {}
+        
+        for chunked_para, results in zip(chunked_paragraphs, chunk_results):
+            para_elem = chunked_para.paragraph_element
+            
+            if para_elem not in aggregated:
+                aggregated[para_elem] = []
+            
+            aggregated[para_elem].extend(results)
+        
+        return aggregated
     
     def _split_paragraph_by_sentences(self, paragraph: str, chunk_size: int) -> List[str]:
         """
@@ -226,12 +318,12 @@ class TextChunker:
         
         return chunks if chunks else [sentence[:chunk_size]]
     
-    def get_chunk_stats(self, chunks: List[str]) -> dict:
+    def get_chunk_stats(self, chunks: Union[List[str], List[ChunkedParagraph]]) -> dict:
         """
         Get statistics about the chunks.
         
         Args:
-            chunks: List of text chunks
+            chunks: List of text chunks or ChunkedParagraph objects
             
         Returns:
             Dictionary with chunk statistics
@@ -242,15 +334,23 @@ class TextChunker:
                 "total_characters": 0,
                 "avg_chunk_size": 0,
                 "min_chunk_size": 0,
-                "max_chunk_size": 0
+                "max_chunk_size": 0,
+                "split_paragraphs": 0
             }
         
-        chunk_sizes = [len(chunk) for chunk in chunks]
+        # Handle both text chunks and ChunkedParagraph objects
+        if isinstance(chunks[0], str):
+            chunk_sizes = [len(chunk) for chunk in chunks]
+            split_paragraphs = 0
+        else:
+            chunk_sizes = [len(chunk.text) for chunk in chunks]
+            split_paragraphs = sum(1 for chunk in chunks if chunk.is_split and chunk.chunk_index == 0)
         
         return {
             "total_chunks": len(chunks),
             "total_characters": sum(chunk_sizes),
             "avg_chunk_size": sum(chunk_sizes) / len(chunk_sizes),
             "min_chunk_size": min(chunk_sizes),
-            "max_chunk_size": max(chunk_sizes)
+            "max_chunk_size": max(chunk_sizes),
+            "split_paragraphs": split_paragraphs
         }

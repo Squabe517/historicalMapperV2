@@ -1,29 +1,33 @@
 """
-ePub document parser implementation.
+ePub document parser implementation with DOM support.
 
 Extracts text content and metadata from ePub files using ebooklib
-and lxml for XHTML parsing.
+and lxml for XHTML parsing, while maintaining DOM structure for
+accurate map placement.
 """
 
 import os
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 from pathlib import Path
 
 import ebooklib
 from ebooklib import epub
 from lxml import html, etree
 
-from .document_parser import DocumentParser, ParserError
+from .document_parser import DocumentParser, ParserError, ParagraphElement
 
 
 class EpubParser(DocumentParser):
-    """Parser for ePub document format."""
+    """Parser for ePub document format with DOM support."""
     
     def __init__(self):
         """Initialize the ePub parser."""
         self.book: epub.EpubBook = None
         self.logger = logging.getLogger(__name__)
+        self._dom_trees: Dict[epub.EpubItem, etree.Element] = {}
+        self._paragraph_elements: List[ParagraphElement] = []
+        self._spine_items: List[epub.EpubItem] = []
     
     def load_file(self, file_path: str) -> None:
         """
@@ -48,6 +52,9 @@ class EpubParser(DocumentParser):
             self.book = epub.read_epub(file_path)
             self.logger.info(f"Successfully loaded ePub: {Path(file_path).name}")
             
+            # Extract spine items for processing
+            self._extract_spine_items()
+            
         except ebooklib.epub.EpubException as e:
             raise ParserError(f"Invalid ePub file: {e}")
         except Exception as e:
@@ -70,7 +77,7 @@ class EpubParser(DocumentParser):
             paragraphs = []
             
             # Get all XHTML documents in reading order
-            for item in self.book.get_items():
+            for item in self._spine_items:
                 if item.get_type() == ebooklib.ITEM_DOCUMENT:
                     # Parse XHTML content
                     content = item.get_content()
@@ -83,6 +90,140 @@ class EpubParser(DocumentParser):
             
         except Exception as e:
             raise ParserError(f"Failed to extract text: {e}")
+    
+    def extract_paragraphs_with_dom(self) -> List[ParagraphElement]:
+        """
+        Extract paragraphs while maintaining DOM structure.
+        
+        Returns:
+            List of ParagraphElement objects with text and DOM references
+            
+        Raises:
+            ParserError: If no document is loaded or extraction fails
+        """
+        if self.book is None:
+            raise ParserError("No ePub file loaded. Call load_file() first.")
+        
+        try:
+            self._paragraph_elements = []
+            para_index = 0
+            
+            # Process each spine item
+            for item in self._spine_items:
+                if item.get_type() != ebooklib.ITEM_DOCUMENT:
+                    continue
+                
+                content = item.get_content()
+                if not content:
+                    continue
+                
+                try:
+                    # Parse XHTML content
+                    parser = etree.XMLParser(recover=True, encoding='utf-8')
+                    tree = etree.fromstring(content, parser=parser)
+                    
+                    # Store the tree for later modification
+                    self._dom_trees[item] = tree
+                    
+                    # Extract paragraphs with namespace handling
+                    nsmap = {'html': 'http://www.w3.org/1999/xhtml'}
+                    paragraphs = tree.xpath('//html:p', namespaces=nsmap)
+                    
+                    if not paragraphs:
+                        # Try without namespace
+                        paragraphs = tree.xpath('//p')
+                    
+                    # Create ParagraphElement for each paragraph
+                    for p_elem in paragraphs:
+                        text = self._get_element_text(p_elem).strip()
+                        if text:
+                            para_element = ParagraphElement(
+                                text=text,
+                                element=p_elem,
+                                container=item,
+                                metadata={
+                                    'file_path': item.file_name,
+                                    'index': para_index,
+                                    'tree': tree
+                                }
+                            )
+                            self._paragraph_elements.append(para_element)
+                            para_index += 1
+                    
+                    self.logger.info(f"Extracted {len(paragraphs)} paragraphs from {item.file_name}")
+                    
+                except etree.XMLSyntaxError as e:
+                    self.logger.warning(f"Skipping malformed document {item.file_name}: {e}")
+                except Exception as e:
+                    self.logger.error(f"Error processing document {item.file_name}: {e}")
+            
+            self.logger.info(f"Total paragraphs with DOM: {len(self._paragraph_elements)}")
+            return self._paragraph_elements
+            
+        except Exception as e:
+            raise ParserError(f"Failed to extract paragraphs with DOM: {e}")
+    
+    def update_dom_element(self, paragraph_element: ParagraphElement, 
+                          new_content: Any) -> None:
+        """
+        Insert new content after a paragraph element.
+        
+        Args:
+            paragraph_element: The paragraph element to update
+            new_content: New content (etree.Element) to insert after the paragraph
+            
+        Raises:
+            ParserError: If update fails
+        """
+        try:
+            # Get the parent element
+            parent = paragraph_element.element.getparent()
+            if parent is None:
+                raise ParserError("Paragraph element has no parent")
+            
+            # Find the paragraph's position
+            para_index = list(parent).index(paragraph_element.element)
+            
+            # Insert new content after the paragraph
+            parent.insert(para_index + 1, new_content)
+            
+            self.logger.info(f"Inserted content after paragraph {paragraph_element.metadata['index']}")
+            
+        except Exception as e:
+            raise ParserError(f"Failed to update DOM element: {e}")
+    
+    def save_document(self, output_path: str) -> None:
+        """
+        Save the modified ePub document.
+        
+        Args:
+            output_path: Path to save the modified ePub
+            
+        Raises:
+            ParserError: If save fails
+        """
+        if self.book is None:
+            raise ParserError("No ePub file loaded")
+        
+        try:
+            # Update all modified XHTML content
+            for item, tree in self._dom_trees.items():
+                # Serialize the modified tree
+                updated_content = etree.tostring(
+                    tree,
+                    pretty_print=True,
+                    encoding='utf-8',
+                    xml_declaration=True,
+                    method='xml'
+                )
+                item.content = updated_content
+            
+            # Save the ePub
+            epub.write_epub(output_path, self.book)
+            self.logger.info(f"Saved modified ePub to: {output_path}")
+            
+        except Exception as e:
+            raise ParserError(f"Failed to save ePub: {e}")
     
     def get_metadata(self) -> Dict[str, Any]:
         """
@@ -112,6 +253,20 @@ class EpubParser(DocumentParser):
             
         except Exception as e:
             raise ParserError(f"Failed to extract metadata: {e}")
+    
+    def _extract_spine_items(self) -> None:
+        """Extract spine items in reading order."""
+        self._spine_items = []
+        
+        for spine_item in self.book.spine:
+            if isinstance(spine_item, tuple):
+                item_id = spine_item[0]
+            else:
+                item_id = spine_item
+            
+            item = self.book.get_item_with_id(item_id)
+            if item:
+                self._spine_items.append(item)
     
     def _extract_paragraphs_from_xhtml(self, content: bytes) -> List[str]:
         """
