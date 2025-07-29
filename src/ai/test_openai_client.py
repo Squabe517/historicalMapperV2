@@ -1,388 +1,364 @@
 """
-Unit tests for OpenAI client implementation.
-
-Tests cover API interactions, retry logic, error handling,
-and batch processing with comprehensive mocking.
+Test suite for OpenAI client place name extraction with structured outputs.
 """
 
 import json
-import pytest
 import logging
+import pytest
 from unittest.mock import Mock, patch, MagicMock
-from concurrent.futures import Future
 
-from src.ai.openai_client import OpenAIClient, OpenAIError
+from .openai_client import OpenAIClient, OpenAIError, Place, PlacesList
+
+
+@pytest.fixture
+def mock_config():
+    """Mock configuration values."""
+    config_values = {
+        "OPENAI_API_KEY": "test-api-key",
+        "OPENAI_MODEL": "gpt-4o-2024-08-06",
+    }
+    
+    def get_config(key, default=None):
+        return config_values.get(key, default)
+    
+    with patch('src.ai.openai_client.get_config', side_effect=get_config):
+        yield get_config
+
+
+@pytest.fixture
+def mock_openai_response():
+    """Create a mock OpenAI structured response."""
+    response = Mock()
+    response.choices = [Mock()]
+    
+    # Create mock parsed output with Pydantic models
+    parsed_output = PlacesList(places=[
+        Place(place="Paris", zoom=11),
+        Place(place="London", zoom=11),
+        Place(place="New York", zoom=11)
+    ])
+    
+    response.choices[0].message = Mock()
+    response.choices[0].message.parsed = parsed_output
+    return response
+
+
+@pytest.fixture
+def client(mock_config):
+    """Create a test client with mocked configuration."""
+    with patch('src.ai.openai_client.OpenAI'):
+        return OpenAIClient()
 
 
 class TestOpenAIClientInitialization:
-    """Test cases for OpenAI client initialization."""
+    """Test client initialization."""
     
-    @patch('src.ai.openai_client.get_config')
-    def test_initialization_with_defaults(self, mock_get_config):
-        """Test client initialization with default config values."""
-        mock_get_config.side_effect = lambda key, default=None: {
-            "OPENAI_API_KEY": "test-key",
-            "OPENAI_MODEL": "gpt-4o",
-            "OPENAI_MAX_CONCURRENT": "5"
-        }.get(key, default)
-        
-        client = OpenAIClient()
-        
-        assert client.api_key == "test-key"
-        assert client.model == "gpt-4o"
-        assert client.max_concurrent == 5
+    def test_init_with_defaults(self, mock_config):
+        """Test initialization with default configuration."""
+        with patch('src.ai.openai_client.OpenAI') as mock_openai:
+            client = OpenAIClient()
+            
+            assert client.api_key == "test-api-key"
+            assert client.model == "gpt-4o-2024-08-06"
+            mock_openai.assert_called_once_with(api_key="test-api-key")
     
-    def test_initialization_with_explicit_params(self):
-        """Test client initialization with explicit parameters."""
-        client = OpenAIClient(api_key="explicit-key", model="gpt-3.5-turbo")
-        
-        assert client.api_key == "explicit-key"
-        assert client.model == "gpt-3.5-turbo"
+    def test_init_with_custom_values(self, mock_config):
+        """Test initialization with custom API key and model."""
+        with patch('src.ai.openai_client.OpenAI') as mock_openai:
+            client = OpenAIClient(api_key="custom-key", model="gpt-4o-mini")
+            
+            assert client.api_key == "custom-key"
+            assert client.model == "gpt-4o-mini"
+            mock_openai.assert_called_once_with(api_key="custom-key")
     
-    @patch('src.ai.openai_client.get_config')
-    def test_initialization_missing_api_key(self, mock_get_config):
+    def test_init_without_api_key(self):
         """Test initialization fails without API key."""
-        mock_get_config.return_value = None
-        
-        with pytest.raises(OpenAIError, match="OpenAI API key not provided"):
-            OpenAIClient()
+        with patch('src.ai.openai_client.get_config', return_value=None):
+            with pytest.raises(OpenAIError, match="OpenAI API key not provided"):
+                OpenAIClient()
 
 
 class TestAnalyzeChunk:
-    """Test cases for single chunk analysis."""
+    """Test single chunk analysis with structured outputs."""
     
-    def setup_method(self):
-        """Set up test client instance."""
-        self.client = OpenAIClient(api_key="test-key")
+    def test_analyze_chunk_success(self, client, mock_openai_response):
+        """Test successful place name extraction with zoom levels."""
+        client.client.beta.chat.completions.parse = Mock(return_value=mock_openai_response)
+        
+        result = client.analyze_chunk("I traveled from Paris to London and then to New York.")
+        
+        assert len(result) == 3
+        assert result[0] == {"place": "Paris", "zoom": 11}
+        assert result[1] == {"place": "London", "zoom": 11}
+        assert result[2] == {"place": "New York", "zoom": 11}
+        client.client.beta.chat.completions.parse.assert_called_once()
     
-    def test_analyze_chunk_empty_input(self):
-        """Test analyze_chunk with empty input."""
-        assert self.client.analyze_chunk("") == []
-        assert self.client.analyze_chunk("   ") == []
-        assert self.client.analyze_chunk(None) == []
+    def test_analyze_chunk_empty_input(self, client):
+        """Test handling of empty input."""
+        result = client.analyze_chunk("")
+        assert result == []
+        
+        result = client.analyze_chunk("   ")
+        assert result == []
     
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_success_direct_array(self, mock_openai_class):
-        """Test successful chunk analysis with direct JSON array response."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
+    def test_analyze_chunk_different_zoom_levels(self, client):
+        """Test extraction with different zoom levels for different place types."""
+        response = Mock()
+        response.choices = [Mock()]
         
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '["Paris", "London", "Berlin"]'
-        mock_client.chat.completions.create.return_value = mock_response
+        parsed_output = PlacesList(places=[
+            Place(place="Europe", zoom=4),
+            Place(place="Italy", zoom=6),
+            Place(place="Rome", zoom=11),
+            Place(place="Colosseum", zoom=17)
+        ])
         
-        client = OpenAIClient(api_key="test-key")
-        result = client.analyze_chunk("Text about Paris, London, and Berlin.")
+        response.choices[0].message.parsed = parsed_output
+        client.client.beta.chat.completions.parse = Mock(return_value=response)
         
-        assert result == ["Paris", "London", "Berlin"]
-        mock_client.chat.completions.create.assert_called_once()
+        result = client.analyze_chunk("From Europe to Italy, visiting Rome and the Colosseum.")
+        
+        assert len(result) == 4
+        assert result[0]["place"] == "Europe"
+        assert result[0]["zoom"] == 4  # Continent
+        assert result[1]["place"] == "Italy"
+        assert result[1]["zoom"] == 6  # Country
+        assert result[2]["place"] == "Rome"
+        assert result[2]["zoom"] == 11  # City
+        assert result[3]["place"] == "Colosseum"
+        assert result[3]["zoom"] == 17  # Landmark
     
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_success_object_response(self, mock_openai_class):
-        """Test successful chunk analysis with object containing places array."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
+    def test_analyze_chunk_retry_on_rate_limit(self, client):
+        """Test retry logic for rate limit errors."""
+        response = Mock()
+        response.choices = [Mock()]
         
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"places": ["Rome", "Athens"]}'
-        mock_client.chat.completions.create.return_value = mock_response
+        parsed_output = PlacesList(places=[
+            Place(place="Madrid", zoom=11)
+        ])
+        response.choices[0].message.parsed = parsed_output
         
-        client = OpenAIClient(api_key="test-key")
-        result = client.analyze_chunk("Ancient Rome and Athens were great cities.")
+        # First call fails with rate limit, second succeeds
+        client.client.beta.chat.completions.parse = Mock(
+            side_effect=[
+                Exception("Rate limit exceeded"),
+                response
+            ]
+        )
         
-        assert result == ["Rome", "Athens"]
+        result = client.analyze_chunk("Madrid is the capital of Spain.")
+        assert result == [{"place": "Madrid", "zoom": 11}]
+        assert client.client.beta.chat.completions.parse.call_count == 2
     
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_malformed_json(self, mock_openai_class):
-        """Test chunk analysis with malformed JSON response."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = 'Not valid JSON at all'
-        mock_client.chat.completions.create.return_value = mock_response
-        
-        client = OpenAIClient(api_key="test-key")
-        
-        with pytest.raises(OpenAIError, match="Invalid JSON response"):
-            client.analyze_chunk("Some text")
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_rate_limit_retry(self, mock_openai_class):
-        """Test rate limit handling with eventual success."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        
-        # First call raises rate limit error, second succeeds
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '["Success"]'
-        
-        mock_client.chat.completions.create.side_effect = [
-            Exception("rate limit exceeded"),
-            mock_response
-        ]
-        
-        client = OpenAIClient(api_key="test-key")
-        result = client.analyze_chunk("Test text")
-        
-        assert result == ["Success"]
-        assert mock_client.chat.completions.create.call_count == 2
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_persistent_failure(self, mock_openai_class):
-        """Test failure after maximum retries."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        mock_client.chat.completions.create.side_effect = Exception("Persistent rate limit")
-        
-        client = OpenAIClient(api_key="test-key")
-        
-        with pytest.raises(OpenAIError):
-            client.analyze_chunk("Test text")
-        
-        assert mock_client.chat.completions.create.call_count == 3  # Default retry count
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_api_connection_error(self, mock_openai_class):
-        """Test handling of API connection errors."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        mock_client.chat.completions.create.side_effect = Exception("Connection failed")
-        
-        client = OpenAIClient(api_key="test-key")
-        
-        with pytest.raises(OpenAIError):
-            client.analyze_chunk("Test text")
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_unexpected_error(self, mock_openai_class):
-        """Test handling of unexpected errors."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        mock_client.chat.completions.create.side_effect = Exception("Unexpected error")
-        
-        client = OpenAIClient(api_key="test-key")
+    def test_analyze_chunk_api_error(self, client):
+        """Test handling of non-retryable API errors."""
+        client.client.beta.chat.completions.parse = Mock(
+            side_effect=Exception("Invalid request")
+        )
         
         with pytest.raises(OpenAIError, match="OpenAI API call failed"):
-            client.analyze_chunk("Test text")
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_filters_empty_places(self, mock_openai_class):
-        """Test that empty place names are filtered out."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '["Paris", "", "London", null, "Berlin"]'
-        mock_client.chat.completions.create.return_value = mock_response
-        
-        client = OpenAIClient(api_key="test-key")
-        result = client.analyze_chunk("Test text")
-        
-        assert result == ["Paris", "London", "Berlin"]
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_analyze_chunk_logging(self, mock_openai_class, caplog):
-        """Test that chunk analysis is properly logged."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
-        
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '["Paris"]'
-        mock_client.chat.completions.create.return_value = mock_response
-        
-        client = OpenAIClient(api_key="test-key")
-        
-        with caplog.at_level(logging.DEBUG):
-            client.analyze_chunk("Short text")
-        
-        assert "Analyzed chunk" in caplog.text
-        assert "found 1 places" in caplog.text
+            client.analyze_chunk("Some text")
 
 
 class TestBatchAnalyzeChunks:
-    """Test cases for batch chunk processing."""
+    """Test batch chunk analysis."""
     
-    def setup_method(self):
-        """Set up test client instance."""
-        self.client = OpenAIClient(api_key="test-key")
-    
-    def test_batch_analyze_empty_input(self, caplog):
-        """Test batch analysis with empty input."""
-        with caplog.at_level(logging.INFO):
-            result = self.client.batch_analyze_chunks([])
-        
+    def test_batch_analyze_empty_list(self, client):
+        """Test handling of empty chunk list."""
+        result = client.batch_analyze_chunks([])
         assert result == []
-        assert "No chunks to analyze" in caplog.text
     
-    @patch.object(OpenAIClient, 'analyze_chunk')
-    def test_batch_analyze_success(self, mock_analyze, caplog):
-        """Test successful batch processing."""
-        mock_analyze.side_effect = [
-            ["Paris", "London"],
-            ["Berlin", "Rome"],
-            ["Tokyo"]
+    def test_batch_analyze_success(self, client):
+        """Test successful batch analysis."""
+        chunks = [
+            "Paris is beautiful.",
+            "London has great museums.",
+            "New York is vibrant."
         ]
         
-        chunks = ["Chunk 1", "Chunk 2", "Chunk 3"]
-        
-        with caplog.at_level(logging.INFO):
-            result = self.client.batch_analyze_chunks(chunks)
-        
-        assert result == [["Paris", "London"], ["Berlin", "Rome"], ["Tokyo"]]
-        assert mock_analyze.call_count == 3
-        assert "Sending 3 chunks to OpenAI" in caplog.text
-        assert "3/3 chunks successful" in caplog.text
-        assert "5 total places found" in caplog.text
-    
-    @patch.object(OpenAIClient, 'analyze_chunk')
-    def test_batch_analyze_partial_failure(self, mock_analyze, caplog):
-        """Test batch processing with some failures."""
-        mock_analyze.side_effect = [
-            ["Paris"],
-            OpenAIError("API error"),
-            ["London"]
+        responses = [
+            [{"place": "Paris", "zoom": 11}],
+            [{"place": "London", "zoom": 11}],
+            [{"place": "New York", "zoom": 11}]
         ]
         
+        def mock_analyze(chunk):
+            for i, c in enumerate(chunks):
+                if chunk == c:
+                    return responses[i]
+            return []
+        
+        client.analyze_chunk = Mock(side_effect=mock_analyze)
+        
+        results = client.batch_analyze_chunks(chunks)
+        
+        assert len(results) == 3
+        assert results[0] == [{"place": "Paris", "zoom": 11}]
+        assert results[1] == [{"place": "London", "zoom": 11}]
+        assert results[2] == [{"place": "New York", "zoom": 11}]
+        assert client.analyze_chunk.call_count == 3
+    
+    def test_batch_analyze_with_failures(self, client):
+        """Test batch analysis with some failures."""
         chunks = ["Chunk 1", "Chunk 2", "Chunk 3"]
         
-        with caplog.at_level(logging.INFO):
-            result = self.client.batch_analyze_chunks(chunks)
+        def mock_analyze(chunk):
+            if chunk == "Chunk 2":
+                raise Exception("API Error")
+            return [{"place": "Place", "zoom": 10}]
         
-        # Should return empty list for failed chunk
-        assert result == [["Paris"], [], ["London"]]
-        assert "Failed to analyze chunk 1" in caplog.text
-        assert "Encountered 1 errors" in caplog.text
+        client.analyze_chunk = Mock(side_effect=mock_analyze)
+        
+        with patch.object(client.logger, 'error') as mock_logger:
+            results = client.batch_analyze_chunks(chunks)
+            
+            assert len(results) == 3
+            assert results[0] == [{"place": "Place", "zoom": 10}]
+            assert results[1] == []  # Failed chunk
+            assert results[2] == [{"place": "Place", "zoom": 10}]
+            
+            # Check that error was logged
+            mock_logger.assert_called()
     
-    @patch.object(OpenAIClient, 'analyze_chunk')
-    def test_batch_analyze_preserves_order(self, mock_analyze):
-        """Test that batch processing preserves chunk order."""
-        # Use different delays to test concurrent processing
-        def slow_analyze(chunk):
-            if "slow" in chunk:
-                import time
-                time.sleep(0.1)
-                return ["Slow"]
-            return ["Fast"]
+    def test_batch_analyze_progress_logging(self, client):
+        """Test progress logging for large batches."""
+        chunks = [f"Chunk {i}" for i in range(25)]
         
-        mock_analyze.side_effect = slow_analyze
+        client.analyze_chunk = Mock(return_value=[{"place": "Place", "zoom": 10}])
         
-        chunks = ["fast chunk", "slow chunk", "another fast"]
-        result = self.client.batch_analyze_chunks(chunks)
-        
-        assert result == [["Fast"], ["Slow"], ["Fast"]]
-    
+        with patch.object(client.logger, 'info') as mock_logger:
+            client.batch_analyze_chunks(chunks)
+            
+            # Should log progress at chunks 0, 10, and 20
+            progress_logs = [call for call in mock_logger.call_args_list 
+                           if "Processing chunk" in str(call)]
+            assert len(progress_logs) == 3
 
-class TestUsageStats:
-    """Test cases for usage statistics."""
+
+class TestGetUsageStats:
+    """Test usage statistics."""
     
-    def test_get_usage_stats(self):
-        """Test usage statistics collection."""
-        client = OpenAIClient(api_key="test-key", model="gpt-4")
-        
+    def test_get_usage_stats(self, client):
+        """Test getting usage statistics."""
         stats = client.get_usage_stats()
         
-        assert stats["model"] == "gpt-4"
-        assert stats["max_concurrent"] == 5  # Default value
+        assert stats["model"] == "gpt-4o-2024-08-06"
         assert stats["api_key_set"] is True
+        assert stats["supports_structured_outputs"] is True
 
 
-
-class TestErrorHandling:
-    """Test cases for error handling scenarios."""
+class TestExtractPlaceNamesOnly:
+    """Test legacy method for backward compatibility."""
     
-    def test_openai_error_inheritance(self):
-        """Test OpenAIError exception inheritance."""
-        assert issubclass(OpenAIError, Exception)
-    
-    def test_openai_error_message(self):
-        """Test OpenAIError message handling."""
-        error = OpenAIError("Test error message")
-        assert str(error) == "Test error message"
-    
-    @patch('src.ai.openai_client.OpenAI')
-    def test_semaphore_usage(self, mock_openai_class):
-        """Test that semaphore is used for rate limiting."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
+    def test_extract_place_names_only(self, client):
+        """Test extraction of place names without zoom levels."""
+        client.analyze_chunk = Mock(return_value=[
+            {"place": "Tokyo", "zoom": 11},
+            {"place": "Kyoto", "zoom": 11},
+            {"place": "Osaka", "zoom": 11}
+        ])
         
-        # Mock successful response
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '["Test"]'
-        mock_client.chat.completions.create.return_value = mock_response
+        result = client.extract_place_names_only("Japanese cities include Tokyo, Kyoto, and Osaka.")
         
-        client = OpenAIClient(api_key="test-key")
-        
-        # Just verify the semaphore exists and is configured correctly
-        assert client.semaphore is not None
-        assert client.semaphore._value <= client.max_concurrent
-        assert client.max_concurrent == 5  # Default value
-        
-        # Verify the method runs without error (semaphore is used internally)
-        result = client.analyze_chunk("Test chunk")
-        assert result == ["Test"]
+        assert result == ["Tokyo", "Kyoto", "Osaka"]
+        client.analyze_chunk.assert_called_once()
 
 
 class TestIntegrationScenarios:
-    """Integration test scenarios for realistic use cases."""
+    """Test real-world usage scenarios."""
     
-    def setup_method(self):
-        """Set up test client instance."""
-        self.client = OpenAIClient(api_key="test-key")
+    def test_historical_text_extraction(self, client):
+        """Test extraction from historical text."""
+        historical_text = """
+        In 1492, Columbus sailed from Palos de la Frontera in Spain,
+        across the Atlantic Ocean, and reached the Bahamas. He later
+        visited Cuba and Hispaniola before returning to Castile.
+        """
+        
+        response = Mock()
+        response.choices = [Mock()]
+        
+        parsed_output = PlacesList(places=[
+            Place(place="Palos de la Frontera", zoom=13),
+            Place(place="Spain", zoom=6),
+            Place(place="Atlantic Ocean", zoom=3),
+            Place(place="Bahamas", zoom=8),
+            Place(place="Cuba", zoom=7),
+            Place(place="Hispaniola", zoom=8),
+            Place(place="Castile", zoom=7)
+        ])
+        
+        response.choices[0].message.parsed = parsed_output
+        client.client.beta.chat.completions.parse = Mock(return_value=response)
+        
+        result = client.analyze_chunk(historical_text)
+        assert len(result) == 7
+        assert any(p["place"] == "Spain" and p["zoom"] == 6 for p in result)
+        assert any(p["place"] == "Cuba" and p["zoom"] == 7 for p in result)
+        assert any(p["place"] == "Atlantic Ocean" and p["zoom"] == 3 for p in result)
     
-    @patch('src.ai.openai_client.OpenAI')
-    def test_realistic_historical_text(self, mock_openai_class):
-        """Test with realistic historical text content."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
+    def test_modern_place_name_conversion(self, client):
+        """Test conversion to modern place names."""
+        text = "Constantinople was the capital of Byzantium."
         
-        mock_response = Mock()
-        mock_response.choices = [Mock()]
-        mock_response.choices[0].message.content = '{"places": ["Constantinople", "Ottoman Empire", "Byzantine Empire"]}'
-        mock_client.chat.completions.create.return_value = mock_response
+        response = Mock()
+        response.choices = [Mock()]
         
-        client = OpenAIClient(api_key="test-key")
-        chunk = "In 1453, Constantinople fell to the Ottoman Empire, ending the Byzantine Empire."
-        result = client.analyze_chunk(chunk)
+        # API should return modern equivalent
+        parsed_output = PlacesList(places=[
+            Place(place="Istanbul", zoom=11),
+            Place(place="Turkey", zoom=6)  # Modern country name
+        ])
         
-        assert "Constantinople" in result
-        assert "Ottoman Empire" in result
-        assert "Byzantine Empire" in result
+        response.choices[0].message.parsed = parsed_output
+        client.client.beta.chat.completions.parse = Mock(return_value=response)
+        
+        result = client.analyze_chunk(text)
+        assert len(result) == 2
+        assert result[0]["place"] == "Istanbul"
+        assert result[0]["zoom"] == 11
+        assert result[1]["place"] == "Turkey"
+        assert result[1]["zoom"] == 6
+
+
+@pytest.mark.parametrize("chunk,expected", [
+    ("", []),
+    ("   \n\t  ", []),
+    ("No places mentioned here.", []),
+    ("Single place: Paris", [{"place": "Paris", "zoom": 11}]),
+])
+def test_various_inputs(client, chunk, expected):
+    """Test various input scenarios."""
+    if chunk.strip() and expected:
+        response = Mock()
+        response.choices = [Mock()]
+        
+        places = [Place(**p) for p in expected]
+        parsed_output = PlacesList(places=places)
+        response.choices[0].message.parsed = parsed_output
+        
+        client.client.beta.chat.completions.parse = Mock(return_value=response)
     
-    @patch('src.ai.openai_client.OpenAI')
-    def test_mixed_response_formats(self, mock_openai_class):
-        """Test handling of different response formats in batch."""
-        mock_client = Mock()
-        mock_openai_class.return_value = mock_client
+    result = client.analyze_chunk(chunk)
+    assert result == expected
+
+
+class TestStructuredOutputFormat:
+    """Test the structured output format requirements."""
+    
+    def test_parse_method_called_with_correct_params(self, client):
+        """Test that parse method is called with correct parameters."""
+        response = Mock()
+        response.choices = [Mock()]
+        response.choices[0].message.parsed = PlacesList(places=[])
         
-        responses = [
-            '["Direct", "Array"]',
-            '{"places": ["Object", "Format"]}',
-            '{"locations": ["Alt", "Key"]}',
-            '{"data": {"nested": "ignored"}}'  # Should result in empty
-        ]
+        client.client.beta.chat.completions.parse = Mock(return_value=response)
         
-        mock_responses = []
-        for response_text in responses:
-            mock_response = Mock()
-            mock_response.choices = [Mock()]
-            mock_response.choices[0].message.content = response_text
-            mock_responses.append(mock_response)
+        client.analyze_chunk("Some text")
         
-        mock_client.chat.completions.create.side_effect = mock_responses
-        
-        client = OpenAIClient(api_key="test-key")
-        chunks = ["chunk1", "chunk2", "chunk3", "chunk4"]
-        result = client.batch_analyze_chunks(chunks)
-        
-        assert result[0] == ["Direct", "Array"]
-        assert result[1] == ["Object", "Format"]
-        assert result[2] == ["Alt", "Key"]
-        assert result[3] == []  # Malformed response should return empty
+        # Verify the parse method was called with the correct parameters
+        call_args = client.client.beta.chat.completions.parse.call_args
+        assert call_args[1]["model"] == "gpt-4o-2024-08-06"
+        assert call_args[1]["response_format"] == PlacesList
+        assert call_args[1]["temperature"] == 0
+        assert len(call_args[1]["messages"]) == 2

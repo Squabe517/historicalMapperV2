@@ -9,10 +9,9 @@ import json
 import logging
 import time
 from typing import List, Dict, Any
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Semaphore
 
 from openai import OpenAI
+from pydantic import BaseModel
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 from src.config.config_module import get_config
@@ -21,6 +20,17 @@ from src.config.config_module import get_config
 class OpenAIError(Exception):
     """Custom exception for OpenAI API failures."""
     pass
+
+
+class Place(BaseModel):
+    """Model for a geographical place with zoom level."""
+    place: str
+    zoom: int
+
+
+class PlacesList(BaseModel):
+    """Model for a list of places."""
+    places: List[Place]
 
 
 class OpenAIClient:
@@ -32,10 +42,11 @@ class OpenAIClient:
         
         Args:
             api_key: OpenAI API key (defaults to config)
-            model: Model name (defaults to gpt-4o)
+            model: Model name (defaults to gpt-4o-2024-08-06 for structured outputs)
         """
         self.api_key = api_key or get_config("OPENAI_API_KEY")
-        self.model = model or get_config("OPENAI_MODEL", "gpt-4o")
+        # Use a model that supports structured outputs
+        self.model = model or get_config("OPENAI_MODEL", "gpt-4o-2024-08-06")
         self.logger = logging.getLogger(__name__)
         
         if not self.api_key:
@@ -44,18 +55,15 @@ class OpenAIClient:
         # Configure OpenAI client
         self.client = OpenAI(api_key=self.api_key)
         
-        # Rate limiting
-        self.max_concurrent = int(get_config("OPENAI_MAX_CONCURRENT", "5"))
-        self.semaphore = Semaphore(self.max_concurrent)
-        
         self.logger.info(f"Initialized OpenAI client with model: {self.model}")
     
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((Exception,))  # Will catch OpenAI exceptions
+        retry=retry_if_exception_type((Exception,)),  # Will catch OpenAI exceptions
+        reraise=True
     )
-    def analyze_chunk(self, chunk: str) -> List[str]:
+    def analyze_chunk(self, chunk: str) -> List[Dict[str, Any]]:
         """
         Extract place names from a single text chunk using OpenAI.
         
@@ -63,7 +71,7 @@ class OpenAIClient:
             chunk: Text content to analyze
             
         Returns:
-            List of unique place names found
+            List of dictionaries with 'place' and 'zoom' fields
             
         Raises:
             OpenAIError: If API call fails after retries
@@ -74,63 +82,47 @@ class OpenAIClient:
         start_time = time.time()
         
         try:
-            with self.semaphore:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system",
-                            "content": (
-                                "You are a historical geography expert. Extract all geographical "
-                                "place names (cities, countries, regions, landmarks) from text. "
-                                "Use modern names where possible. Return only a JSON array of strings."
-                            )
-                        },
-                        {
-                            "role": "user",
-                            "content": (
-                                f"Identify all historical or modern place names mentioned in the following text. "
-                                f"Respond with a JSON array of unique place names (modern equivalents where known):\n\n"
-                                f'"{chunk}"'
-                            )
-                        }
-                    ],
-                    temperature=0,
-                )
+            # Use structured outputs with Pydantic models
+            response = self.client.beta.chat.completions.parse(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a historical geography expert. Extract all geographical "
+                            "place names (cities, countries, regions, landmarks) from text. "
+                            "Use modern names where possible. For each place, provide an appropriate "
+                            "Google Maps zoom level: "
+                            "- Continents: 3-4"
+                            "- Countries: 5-6"
+                            "- States/Regions: 6-8"
+                            "- Cities: 10-12"
+                            "- Neighborhoods/Districts: 13-15"
+                            "- Specific landmarks/buildings: 16-18"
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": (
+                            f"Identify all historical or modern place names mentioned in the following text. "
+                            f"For each place, determine the appropriate Google Maps zoom level based on its type. "
+                            f"Use modern place names where known:\n\n"
+                            f'"{chunk}"'
+                        )
+                    }
+                ],
+                temperature=0,
+                response_format=PlacesList,
+            )
             
-            # Extract and parse response
-            content = response.choices[0].message.content.strip()
+            # Extract the parsed structured output
+            parsed_output = response.choices[0].message.parsed
             
-            try:
-                # Handle both direct array and object with array property
-                parsed = json.loads(content)
-                if isinstance(parsed, list):
-                    places = parsed
-                elif isinstance(parsed, dict):
-                    # Try common property names
-                    places = (parsed.get("places") or 
-                             parsed.get("place_names") or 
-                             parsed.get("locations"))
-                    
-                    # If no standard property found, try first value if it's a list
-                    if places is None and parsed:
-                        first_value = list(parsed.values())[0]
-                        if isinstance(first_value, list):
-                            places = first_value
-                        else:
-                            places = []
-                    elif places is None:
-                        places = []
-                else:
-                    places = []
-                
-                # Ensure all items are strings
-                places = [str(place).strip() for place in places if place]
-                places = [place for place in places if place]  # Remove empty strings
-                
-            except json.JSONDecodeError as e:
-                self.logger.error(f"Failed to parse OpenAI response as JSON: {content[:100]}...")
-                raise OpenAIError(f"Invalid JSON response from OpenAI: {e}")
+            # Convert Pydantic models to dictionaries
+            places = [
+                {"place": place.place, "zoom": place.zoom}
+                for place in parsed_output.places
+            ]
             
             elapsed = time.time() - start_time
             self.logger.debug(
@@ -150,7 +142,7 @@ class OpenAIClient:
                 self.logger.error(f"OpenAI API call failed: {e}")
                 raise OpenAIError(f"OpenAI API call failed: {e}")
     
-    def batch_analyze_chunks(self, chunks: List[str]) -> List[List[str]]:
+    def batch_analyze_chunks(self, chunks: List[str]) -> List[List[Dict[str, Any]]]:
         """
         Process multiple text chunks to extract place names.
         
@@ -158,7 +150,7 @@ class OpenAIClient:
             chunks: List of text chunks to analyze
             
         Returns:
-            List of place name lists, one per input chunk
+            List of place lists, one per input chunk. Each place is a dict with 'place' and 'zoom'
             
         Raises:
             OpenAIError: If any chunk analysis fails after retries
@@ -169,32 +161,28 @@ class OpenAIClient:
         
         self.logger.info(f"Sending {len(chunks)} chunks to OpenAI for analysis")
         
-        # Process chunks with controlled concurrency
-        results = [None] * len(chunks)  # Preserve order
+        # Process chunks sequentially
+        results = []
         errors = []
         
-        with ThreadPoolExecutor(max_workers=self.max_concurrent) as executor:
-            # Submit all tasks
-            future_to_index = {
-                executor.submit(self.analyze_chunk, chunk): i 
-                for i, chunk in enumerate(chunks)
-            }
-            
-            # Collect results
-            for future in as_completed(future_to_index):
-                index = future_to_index[future]
-                try:
-                    result = future.result()
-                    results[index] = result
-                except Exception as e:
-                    error_msg = f"Failed to analyze chunk {index}: {e}"
-                    self.logger.error(error_msg)
-                    errors.append(error_msg)
-                    results[index] = []  # Empty result for failed chunk
+        for i, chunk in enumerate(chunks):
+            try:
+                # Log progress for longer batches
+                if len(chunks) > 10 and i % 10 == 0:
+                    self.logger.info(f"Processing chunk {i+1}/{len(chunks)}")
+                
+                result = self.analyze_chunk(chunk)
+                results.append(result)
+                
+            except Exception as e:
+                error_msg = f"Failed to analyze chunk {i}: {e}"
+                self.logger.error(error_msg)
+                errors.append(error_msg)
+                results.append([])  # Empty result for failed chunk
         
         # Report summary
         total_places = sum(len(result) for result in results)
-        successful_chunks = len([r for r in results if r is not None])
+        successful_chunks = len([r for r in results if r])
         
         self.logger.info(
             f"Completed analysis: {successful_chunks}/{len(chunks)} chunks successful, "
@@ -215,6 +203,19 @@ class OpenAIClient:
         """
         return {
             "model": self.model,
-            "max_concurrent": self.max_concurrent,
-            "api_key_set": bool(self.api_key)
+            "api_key_set": bool(self.api_key),
+            "supports_structured_outputs": True
         }
+    
+    def extract_place_names_only(self, chunk: str) -> List[str]:
+        """
+        Legacy method to extract just place names without zoom levels.
+        
+        Args:
+            chunk: Text content to analyze
+            
+        Returns:
+            List of place name strings
+        """
+        places_with_zoom = self.analyze_chunk(chunk)
+        return [place["place"] for place in places_with_zoom]
