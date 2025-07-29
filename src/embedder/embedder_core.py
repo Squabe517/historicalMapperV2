@@ -54,6 +54,7 @@ class EpubMapEmbedder:
             
         self._paragraph_cache = {}  # Cache for paragraph lookups
         self._chunk_to_para_map = {}  # Maps chunk indices to paragraph ranges
+        self._epub_structure = {}  # Store EPUB structure info
         
         log_info(f"EpubMapEmbedder initialized with {self.config.embed_strategy} strategy")
     
@@ -80,6 +81,9 @@ class EpubMapEmbedder:
         """
         # Validate EPUB structure
         self.validate_epub_structure(book)
+        
+        # Analyze EPUB structure for path calculation
+        self._analyze_epub_structure(book)
         
         # Build paragraph index
         self._build_paragraph_index(book)
@@ -126,6 +130,82 @@ class EpubMapEmbedder:
         
         log_info(f"Embedding complete: {embedded_count} maps embedded, {skipped_count} skipped")
         return book
+    
+    def _analyze_epub_structure(self, book: epub.EpubBook) -> None:
+        """
+        Analyze EPUB structure to determine correct image paths.
+        
+        This examines where XHTML files are located to determine:
+        - Common directory patterns
+        - How to construct relative paths to images
+        """
+        # Get all document items
+        doc_items = list(book.get_items_of_type(ebooklib.ITEM_DOCUMENT))
+        
+        # Analyze paths
+        paths = []
+        for item in doc_items:
+            if hasattr(item, 'file_name') and item.file_name:
+                paths.append(item.file_name)
+        
+        if not paths:
+            log_warning("No document paths found for structure analysis")
+            return
+        
+        # Determine common patterns
+        self._epub_structure['total_docs'] = len(paths)
+        
+        # Check if documents are in subdirectories
+        docs_in_subdirs = sum(1 for p in paths if '/' in p)
+        self._epub_structure['docs_in_subdirs'] = docs_in_subdirs
+        
+        # Find common directory patterns
+        directories = set()
+        for path in paths:
+            if '/' in path:
+                dir_path = path.rsplit('/', 1)[0]
+                directories.add(dir_path)
+        
+        self._epub_structure['directories'] = list(directories)
+        
+        # Determine if most docs are in subdirectories
+        self._epub_structure['majority_in_subdirs'] = docs_in_subdirs > len(paths) / 2
+        
+        log_info(f"EPUB structure: {len(paths)} documents, "
+                f"{docs_in_subdirs} in subdirectories, "
+                f"directories: {directories}")
+    
+    def _calculate_image_path(self, xhtml_path: str, image_href: str) -> str:
+        """
+        Calculate the correct relative path from XHTML to image.
+        
+        Args:
+            xhtml_path: Path to the XHTML file (e.g., "text/chapter1.xhtml")
+            image_href: Path to the image (e.g., "images/map.png")
+            
+        Returns:
+            Correct relative path (e.g., "../images/map.png" or "images/map.png")
+        """
+        # Handle different path separators
+        xhtml_path = xhtml_path.replace('\\', '/')
+        image_href = image_href.replace('\\', '/')
+        
+        # Count directory levels in XHTML path
+        xhtml_parts = xhtml_path.split('/')
+        xhtml_depth = len(xhtml_parts) - 1  # -1 for the filename
+        
+        # Count directory levels in image path
+        image_parts = image_href.split('/')
+        image_depth = len(image_parts) - 1  # -1 for the filename
+        
+        # If XHTML is in a subdirectory, we need to go up
+        if xhtml_depth > 0:
+            # Go up the required number of levels
+            up_levels = '../' * xhtml_depth
+            return up_levels + image_href
+        else:
+            # XHTML is in root, use direct path
+            return image_href
     
     def _build_paragraph_index(self, book: epub.EpubBook) -> None:
         """Build index of paragraphs across all XHTML documents."""
@@ -277,7 +357,7 @@ class EpubMapEmbedder:
         
         # Create figure element using strategy
         figure = self.strategy.create_figure_element(
-            image_href, place, self.config
+            image_href, place, self.config, para_info['item'].file_name
         )
         
         # Insert after paragraph
