@@ -42,7 +42,8 @@ class ImageEmbedStrategy(ABC):
     @abstractmethod
     def create_figure_element(self, image_href: str, 
                             place: str,
-                            config: EmbedderConfig) -> etree.Element:
+                            config: EmbedderConfig,
+                            xhtml_path: str) -> etree.Element:
         """
         Create XHTML figure element with image and caption.
         
@@ -50,6 +51,7 @@ class ImageEmbedStrategy(ABC):
             image_href: Href to the embedded image
             place: Place name for alt text and caption
             config: Embedder configuration
+            xhtml_path: Path to the XHTML file (for relative path calculation)
             
         Returns:
             lxml Element representing the complete figure
@@ -86,7 +88,8 @@ class ExternalImageStrategy(ImageEmbedStrategy):
     
     def create_figure_element(self, image_href: str, 
                             place: str,
-                            config: EmbedderConfig) -> etree.Element:
+                            config: EmbedderConfig,
+                            xhtml_path: str) -> etree.Element:
         """Create XHTML figure with external image reference."""
         try:
             # Create namespace map for XHTML
@@ -97,9 +100,14 @@ class ExternalImageStrategy(ImageEmbedStrategy):
             if config.figure_style:
                 figure.set("style", config.figure_style)
             
+            # Calculate relative path based on XHTML location
+            img_src = image_href
+            if xhtml_path and '/' in xhtml_path:
+                # XHTML is in a subdirectory, need to go up
+                depth = xhtml_path.count('/')
+                img_src = '../' * depth + image_href
+            
             # Add image
-            # Use relative path from XHTML document to images folder
-            img_src = f"../{image_href}" if "/" in image_href else image_href
             img = etree.SubElement(figure, "img", {
                 "src": img_src,
                 "alt": f"Map of {place}",
@@ -142,7 +150,8 @@ class InlineImageStrategy(ImageEmbedStrategy):
     
     def create_figure_element(self, image_href: str, 
                             place: str,
-                            config: EmbedderConfig) -> etree.Element:
+                            config: EmbedderConfig,
+                            xhtml_path: str) -> etree.Element:
         """Create XHTML figure with inline Base64 image."""
         try:
             # Create namespace map for XHTML
