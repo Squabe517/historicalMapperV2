@@ -114,9 +114,11 @@ class ExternalImageStrategy(ImageEmbedStrategy):
                 "style": f"max-width: {config.max_image_width};"
             })
             
-            # Add caption
+            # Add caption with italic styling
             caption_text = config.caption_template.format(place=place)
-            figcaption = etree.SubElement(figure, "figcaption")
+            figcaption = etree.SubElement(figure, "figcaption", {
+                "style": "font-style: italic; text-align: center; font-size: 0.9em; color: #666; margin-top: 0.5em; padding: 0 1em;"
+            })
             figcaption.text = caption_text
             
             return figure
@@ -169,9 +171,11 @@ class InlineImageStrategy(ImageEmbedStrategy):
                 "style": f"max-width: {config.max_image_width};"
             })
             
-            # Add caption
+            # Add caption with italic styling
             caption_text = config.caption_template.format(place=place)
-            figcaption = etree.SubElement(figure, "figcaption")
+            figcaption = etree.SubElement(figure, "figcaption", {
+                "style": "font-style: italic; text-align: center; font-size: 0.9em; color: #666; margin-top: 0.5em; padding: 0 1em;"
+            })
             figcaption.text = caption_text
             
             return figure

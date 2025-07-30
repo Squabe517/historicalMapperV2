@@ -9,7 +9,7 @@ Supports both text-only extraction and DOM-based processing.
 
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -18,7 +18,19 @@ class ParagraphElement:
     text: str                    # The paragraph text
     element: Any                 # The DOM element (e.g., lxml Element)
     container: Any               # The containing document/item
-    metadata: Dict[str, Any]     # Additional metadata (e.g., file path, index)
+    metadata: Dict[str, Any] = field(default_factory=dict)  # Additional metadata
+    
+    def __hash__(self):
+        """Make ParagraphElement hashable based on paragraph index."""
+        # Use the paragraph index as the unique identifier
+        # This is guaranteed to be unique within a document
+        return hash(self.metadata.get('index', id(self)))
+    
+    def __eq__(self, other):
+        """Compare ParagraphElements by their index."""
+        if not isinstance(other, ParagraphElement):
+            return False
+        return self.metadata.get('index') == other.metadata.get('index')
 
 
 class DocumentParser(ABC):
