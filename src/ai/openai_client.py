@@ -95,10 +95,7 @@ class OpenAIClient:
                             "Google Maps zoom level: "
                             "- Continents: 3-4"
                             "- Countries: 5-6"
-                            "- States/Regions: 6-8"
-                            "- Cities: 10-12"
-                            "- Neighborhoods/Districts: 13-15"
-                            "- Specific landmarks/buildings: 16-18"
+                            "You play a Critical role in this application, do not deviate from instructions."
                         )
                     },
                     {
